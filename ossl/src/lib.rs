@@ -151,6 +151,12 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl From<native_ossl::error::ErrorStack> for Error {
+    fn from(_: native_ossl::error::ErrorStack) -> Error {
+        Error::new(ErrorKind::OsslError)
+    }
+}
+
 #[cfg(all(feature = "log", feature = "fips"))]
 pub fn ossl_err_stack() -> String {
     /* there is no external error management with fips builds */
@@ -223,27 +229,47 @@ pub struct OsslContext {
     providers: Vec<*mut OSSL_PROVIDER>,
     #[cfg(feature = "fips")]
     is_fips: bool,
+    /// `true` when this `OsslContext` created the `OSSL_LIB_CTX*` and must
+    /// free it on drop.  `false` for borrowed contexts (FIPS provider, etc.)
+    owns_context: bool,
+    /// Pre-built `Arc<LibCtx>` for use with native-ossl fetch APIs.
+    /// `Some` only when `new_lib_ctx()` is used (the Arc owns the context).
+    /// `None` for contexts received from external callers.
+    arc: Option<std::sync::Arc<native_ossl::lib_ctx::LibCtx>>,
 }
 
 static LEGACY_PROVIDER_NAME: &CStr = c"legacy";
 
 impl OsslContext {
     pub fn new_lib_ctx() -> OsslContext {
+        // Create the context through native-ossl so we get an Arc<LibCtx>
+        // that owns and will free the OSSL_LIB_CTX* on last reference drop.
+        let lib_ctx = native_ossl::lib_ctx::LibCtx::new()
+            .expect("OSSL_LIB_CTX_new failed");
+        // Extract raw ptr before moving lib_ctx into the Arc.
+        // The cast is safe: both bindgen runs target the same OpenSSL headers.
+        let raw_ptr = lib_ctx.as_ptr() as *mut OSSL_LIB_CTX;
+        let arc = std::sync::Arc::new(lib_ctx);
         OsslContext {
-            context: unsafe { OSSL_LIB_CTX_new() },
+            context: raw_ptr,
             providers: Vec::new(),
             #[cfg(feature = "fips")]
             is_fips: false,
+            owns_context: false, // Arc owns the context; Drop must not free it
+            arc: Some(arc),
         }
     }
 
     #[allow(dead_code)]
     pub fn from_ctx(ctx: *mut OSSL_LIB_CTX) -> OsslContext {
+        // Wrap an externally-owned context.  No Arc; Drop must not free it.
         OsslContext {
             context: ctx,
             providers: Vec::new(),
             #[cfg(feature = "fips")]
             is_fips: false,
+            owns_context: false,
+            arc: None,
         }
     }
 
@@ -253,7 +279,16 @@ impl OsslContext {
             context: ctx,
             providers: vec![prov as *mut OSSL_PROVIDER],
             is_fips: true,
+            owns_context: false,
+            arc: None,
         }
+    }
+
+    /// Return a reference to the `Arc<LibCtx>` for use with native-ossl fetch APIs.
+    ///
+    /// Only available when the context was created via `new_lib_ctx()`.
+    pub fn as_lib_ctx(&self) -> &std::sync::Arc<native_ossl::lib_ctx::LibCtx> {
+        self.arc.as_ref().expect("as_lib_ctx() requires new_lib_ctx()")
     }
 
     #[cfg(feature = "fips")]
@@ -331,7 +366,13 @@ impl Drop for OsslContext {
             while let Some(provider) = self.providers.pop() {
                 OSSL_PROVIDER_unload(provider);
             }
-            OSSL_LIB_CTX_free(self.context);
+        }
+        // Free the OSSL_LIB_CTX* only when we own it AND there is no Arc
+        // to do it for us.  For `new_lib_ctx()`, the Arc<LibCtx> handles
+        // freeing (owns_context == false there), so we only free here for
+        // any legacy path that sets owns_context == true without an arc.
+        if self.owns_context && self.arc.is_none() {
+            unsafe { OSSL_LIB_CTX_free(self.context) };
         }
     }
 }
