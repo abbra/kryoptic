@@ -13,6 +13,7 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 kryoptic-lib = { version = "1.5.0", path = ".", default-features = false }
 ossl = { version = "1.5.0", path = "ossl", default-features = false }
+native-ossl = { path = "/home/abokovoy/workspace/native-ossl/native-ossl", default-features = false }
 
 [package]
 name = "kryoptic-lib"

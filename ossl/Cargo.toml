@@ -19,6 +19,7 @@ cfg-if = "1.0.0"
 libc = "0.2.151"
 log = { version = "0.4.27", default-features = false, features = ["std"], optional = true }
 vsprintf = { version = "2.0.0", optional = true }
+native-ossl = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4.3"
